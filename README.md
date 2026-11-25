@@ -1,36 +1,125 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# next-js-with-datadog
 
-## Getting Started
+Next.js (App Router) のエラーを Datadog で確認できるようにするための検証用リポジトリです。
 
-First, run the development server:
+## セットアップ
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+pnpm install
+cp .env.local.example .env.local   # DD_API_KEY を設定する
+pnpm dev                           # 本番相当の確認は pnpm build && pnpm start
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+- `DD_API_KEY` は Datadog の **API キー**です。RUM の `clientToken` とは別物です。
+- サーバー専用の値なので、`NEXT_PUBLIC_` を付けず、コミットもしないでください。
+- `.env.local` を変更したら、サーバーを再起動してください。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 構成
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| 対象 | 仕組み | ファイル |
+|---|---|---|
+| ブラウザ側のエラー | Datadog RUM (`@datadog/browser-rum`, `@datadog/browser-rum-nextjs`) | `instrumentation-client.js`, `app/layout.tsx` |
+| エラー画面に遷移したエラー | `error.tsx` / `global-error.tsx` で `addNextjsError` を呼ぶ | `app/error.tsx`, `app/global-error.tsx` |
+| サーバー側のエラー | `onRequestError` から Datadog Logs へ直接送信 | `instrumentation.ts` |
 
-## Learn More
+サーバー側のログは、`https://http-intake.logs.<DD_SITE>/api/v2/logs` に送ります。
+`service` と `env` は RUM と揃えています(`DD_SERVICE` / `DD_ENV`)。
+ヘッダーとクエリ文字列は、Cookie やトークンを含み得るため送りません。
 
-To learn more about Next.js, take a look at the following resources:
+## 検出できる範囲
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| エラー | 検出 | 備考 |
+|---|---|---|
+| クライアントのレンダリングエラー | できる | `error.tsx` 経由 |
+| イベントハンドラの例外、Promise rejection、`console.error` | できる | RUM が自動収集 |
+| fetch が 500 | Errors には出ない | Resources (Fetch) に記録される |
+| Server Component のサーバーエラー | できる | RUM には圧縮されたエラーコードのみ。詳細は Logs |
+| Server Action のエラー | できる | RUM にはクライアントの Promise rejection として届き、メッセージは圧縮されたコード。詳細は Logs |
+| Route Handler のエラー | Logs のみ | RUM の Errors には出ない(fetch の 500 として Resources に記録)。詳細は Logs |
+| `throw` を書かない実行時エラー(`TypeError`、`JSON.parse` の失敗など) | できる | `throw` と同じ扱い。下の「実行時エラーの検証結果」を参照 |
+| `safeParse` の失敗、`try/catch` で握ったエラー | できない | 自分で `addError` やログ送信が必要 |
+| `parse` が投げた `ZodError`(握られない場合) | できる | クライアントは RUM、サーバーは Logs |
+| `satisfies`、zod の `toZod` | 対象外 | 型チェックのみで、実行時には何もしない |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## dev と本番ビルドの違い
 
-## Deploy on Vercel
+| 項目 | dev | 本番ビルド |
+|---|---|---|
+| 同じエラーの件数 | 重複する(React の二重実行) | 1回 |
+| クライアントのエラー | メッセージが読める | メッセージは読める。スタックは圧縮される |
+| サーバーのエラー(RUM 側) | 元のメッセージ | `Minified React error #441` のみ |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+本番で伏せられるのは、**サーバーで起きたエラー**のメッセージです。
+ブラウザで起きたエラーは、本番でも元のメッセージが RUM で確認できます。
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 実行時エラーの検証結果
+
+`throw` や `console.error` を書かず、実行時に自然に起きるエラー(`TypeError`、`JSON.parse` の失敗)でも検証しました(本番ビルド)。
+JavaScript エンジンが投げる例外も、`throw` と同じ扱いで検出されます。検出できるかは、どこで起きたかと、握られたかで決まります。
+
+| 場所 | 起こし方 | RUM(Errors) | Logs |
+|---|---|---|---|
+| クライアントのレンダリング中 | `undefined` のプロパティを読む | 届く。メッセージは元のまま(`Cannot read properties of undefined (reading 'name')`) | なし |
+| クライアントのイベントハンドラ | 同上 | 届く。メッセージは元のまま | なし |
+| Server Component | 同上 | 届く。`Minified React error #441` に伏せられる | 元のメッセージが届く |
+| Server Action | 同上 | 届く(Promise rejection)。`Minified React error #441` に伏せられる | 元のメッセージが届く |
+| Route Handler | `JSON.parse` の失敗 | **届かない**(Errors に出ない) | 元のメッセージが届く(`Expected property name or '}' in JSON at position 1`) |
+
+- クライアントのエラーは、元のメッセージが RUM に残ります。サーバーのエラーは、RUM では伏せられ、Logs に元のメッセージが残ります。
+- Route Handler のエラーは、Logs でしか見えません。
+- Logs の `service` は `nextjs-datadog` で、RUM と揃っています。
+- Logs の3件が、それぞれどの `nextjs.routeType`(`render` / `action` / `route`)になっているか、Route Handler と Server Action に `digest` が付くかは、**未確認**です。
+
+検出できない場合:
+
+- `try/catch` で握ったエラー(自分で記録しない限り、どこにも出ない)。
+- リクエストの外で起きるサーバーのエラー(`setTimeout` やバックグラウンド処理など、レスポンスを返した後に起きるもの)。`onRequestError` の対象外と考えられるが、未検証です。
+- 例外が出ない不具合(値が間違っているだけの場合など)。
+- 別のドメインのスクリプトのエラー(ブラウザの仕様で、詳細が届かない)。
+
+## サーバーエラーの原因を追う手順
+
+1. RUM のエラーから `digest` を得る(`context.nextjs.digest`)。
+   - `addNextjsError` が、`error.digest` を `context.nextjs.digest` として送ります。
+   - RUM Explorer で `@context.nextjs.digest:<値>` を検索して確認できます。**検索の対象は `In Errors` にしてください。** `In Sessions` のままだとヒットしません(`context` はエラーイベントの属性のため)。
+2. Datadog の Logs で `@nextjs.digest:<値>` を検索する。
+3. 元のメッセージ、スタック、ルート、メソッドが見つかる。
+
+確認できていること(本番ビルド、`digest` は `3884010495`):
+- クライアントの `error.digest` に値が入る。
+- RUM Explorer(In Errors)で `@context.nextjs.digest:3884010495` がヒットする。
+- サーバーのログ(Logs)の `nextjs.digest` に同じ値が入る。
+
+つまり、RUM のエラーとサーバーのログが、`digest` で突き合わせられます。
+
+`digest` は、同じエラーなら同じ値になります。発生1回ごとの識別子ではなく、エラーの種類を識別する値です。
+1件ずつ突き合わせたい場合は、発生時刻と RUM のセッションで絞ってください。
+
+## 動作確認用のページ
+
+`/debug-error` に、エラーを意図的に起こすページがあります。
+
+- 1〜5: `throw` を書いたもの(レンダリングエラー、イベントハンドラの例外、Promise rejection)、`console.error`、fetch の 500
+- 6〜9: `throw` を書かない実行時エラー(レンダリング中の `TypeError`、イベントハンドラの `TypeError`、Route Handler の `JSON.parse` 失敗、Server Action の `TypeError`)
+- `/debug-error/server`: Server Component で `throw`(`digest` の確認に使う)
+- `/debug-error/natural-server`: Server Component の `TypeError`(`throw` を書かない)
+
+検証用なので、本番に載せる場合は `app/debug-error/` を削除してください。
+
+## 注意点・今後の課題
+
+- **ソースマップ**: クライアントもサーバーも、スタックの場所はコンパイル後のファイルです。元のコードの位置で見るには、ソースマップの対応が必要です(未対応)。
+- **SSR 中の Client Component のエラー**: サーバー側で起きるため、伏せられる側になるはずですが、未検証です。
+- **`global-error.tsx` に遷移するエラー**(ルートレイアウトでのエラー)は、未検証です。
+- **Route Handler と Server Action の `digest`、`routeType`**: Logs には届いていますが、これらの値は未確認です。
+- **本番デプロイ**: `DD_API_KEY` をデプロイ先の環境変数に設定し、`env` と `version` を本番用の値に変える。
+- **通知**: 新しいエラーが出たときの Datadog のモニターは、未設定です。
+- **`safeParse` の失敗の記録**: 不具合として扱いたい箇所には、ログ用の関数を入れる(個人情報が入らない形にする)。未実装です。
+- **`components/datadog-init.tsx`**: レイアウトが `DatadogAppRouter` に変わったため、現在は使われていません。
+
+## 設計の考え方
+
+- 本番で伏せられるサーバーエラーのメッセージは、クライアントに出さないのが正しい挙動です。サーバー側のログで補います。
+- 想定内のエラー(ユーザーの入力ミスなど)は、投げずに処理し、記録しません。
+- 想定外のスキーマ不一致は、`parse` で投げるか、明示的に記録します。
+- スキーマのずれは、検知よりも、型とスキーマの自動生成と CI での差分検出で、本番に出る前に防ぐのが理想です。
