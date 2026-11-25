@@ -6,13 +6,36 @@ Next.js (App Router) のエラーを Datadog で確認できるようにする�
 
 ```bash
 pnpm install
-cp .env.local.example .env.local   # DD_API_KEY を設定する
-pnpm dev                           # 本番相当の確認は pnpm build && pnpm start
+# .env.local を作成して、下の環境変数を設定する
+pnpm dev        # 本番相当の確認は pnpm build && pnpm start
 ```
 
-- `DD_API_KEY` は Datadog の **API キー**です。RUM の `clientToken` とは別物です。
-- サーバー専用の値なので、`NEXT_PUBLIC_` を付けず、コミットもしないでください。
+`.env.local` に設定する環境変数:
+
+| 変数 | 用途 |
+|---|---|
+| `NEXT_PUBLIC_DD_APPLICATION_ID` | RUM のアプリケーション ID |
+| `NEXT_PUBLIC_DD_CLIENT_TOKEN` | RUM の clientToken(ブラウザに公開される前提の値) |
+| `NEXT_PUBLIC_DD_REMOTE_CONFIG_ID` | RUM のリモート設定 ID |
+| `NEXT_PUBLIC_DD_SITE` | Datadog のサイト(例: `ap1.datadoghq.com`) |
+| `NEXT_PUBLIC_DD_SERVICE` | サービス名(例: `nextjs-datadog`) |
+| `NEXT_PUBLIC_DD_ENV` | 環境名(例: `dev`、`prod`) |
+| `NEXT_PUBLIC_DD_VERSION` | バージョン(例: `1.0.0`) |
+| `DD_API_KEY` | サーバー側のログ送信用の API キー(サーバー側ログを使う場合のみ) |
+
+- `NEXT_PUBLIC_` の値は、**ビルド時に埋め込まれ、ブラウザに公開されます。** 変更したら、再ビルドが必要です。
+- `DD_API_KEY` は Datadog の **API キー**です。RUM の `clientToken` とは別物です。サーバー専用の値なので、`NEXT_PUBLIC_` を付けず、コミットもしないでください。
 - `.env.local` を変更したら、サーバーを再起動してください。
+
+## ファイルの役割(RUM の基本設定)
+
+| ファイル | 役割 |
+|---|---|
+| `package.json`、`pnpm-lock.yaml` | Datadog の依存パッケージ(`@datadog/browser-rum`、`@datadog/browser-rum-nextjs`)を追加している |
+| `instrumentation-client.js` | ブラウザ側で最初に実行され、`datadogRum.init` で RUM を初期化する。設定値は `NEXT_PUBLIC_DD_*` の環境変数から読む。`nextjsPlugin()` で Next.js のルーティングを RUM のビューとして記録する |
+| `app/layout.tsx` | ルートレイアウトに `<DatadogAppRouter />` を置き、App Router の画面遷移を RUM のビューとして記録する |
+| `app/error.tsx` | ルート配下で起きたエラーの共通エラー画面。`addNextjsError` で、エラー(と `digest`)を RUM に送る |
+| `app/global-error.tsx` | ルートレイアウト自体のエラー用の共通エラー画面。`error.tsx` と同様に `addNextjsError` で RUM に送る |
 
 ## 構成
 
